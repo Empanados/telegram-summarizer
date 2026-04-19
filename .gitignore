@@ -1,0 +1,22 @@
+# Environment
+.env
+
+# Telegram session
+session/
+
+# Database
+data/
+
+# Go build artifacts
+bin/
+dist/
+*.exe
+
+# Go module cache
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
