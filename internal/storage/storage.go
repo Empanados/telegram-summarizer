@@ -62,6 +62,10 @@ func (d *DB) migrate() error {
 			text       TEXT    NOT NULL,
 			UNIQUE (username, message_id)
 		);
+		CREATE TABLE IF NOT EXISTS active_channel (
+			user_id    INTEGER PRIMARY KEY,
+			username   TEXT    NOT NULL
+		);
 		CREATE INDEX IF NOT EXISTS idx_msg_username ON messages(username);
 		CREATE INDEX IF NOT EXISTS idx_msg_date     ON messages(date DESC);
 	`)
@@ -251,6 +255,71 @@ func (d *DB) SearchMessages(usernames []string, query string, limit int) ([]Mess
 		result = result[:limit]
 	}
 	return result, nil
+}
+
+// ── Active Channel ────────────────────────────────────────────────────────────
+
+func (d *DB) SetActiveChannel(userID int64, username string) error {
+	_, err := d.db.Exec(
+		`INSERT OR REPLACE INTO active_channel (user_id, username) VALUES (?, ?)`,
+		userID, norm(username),
+	)
+	return err
+}
+
+func (d *DB) GetActiveChannel(userID int64) (string, error) {
+	var username string
+	err := d.db.QueryRow(
+		`SELECT username FROM active_channel WHERE user_id = ?`,
+		userID,
+	).Scan(&username)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return username, err
+}
+
+func (d *DB) ClearActiveChannel(userID int64) error {
+	_, err := d.db.Exec(
+		`DELETE FROM active_channel WHERE user_id = ?`,
+		userID,
+	)
+	return err
+}
+
+func (d *DB) GetRecentMessages(username string, limit int) ([]Message, error) {
+	rows, err := d.db.Query(
+		`SELECT username, message_id, date, text
+		 FROM messages
+		 WHERE username = ? AND text != ''
+		 ORDER BY date DESC LIMIT ?`,
+		norm(username), limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var m Message
+		var dateStr string
+		if err := rows.Scan(&m.Username, &m.MessageID, &dateStr, &m.Text); err != nil {
+			return nil, err
+		}
+		m.Date, _ = time.Parse(time.RFC3339, dateStr)
+		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Reverse to chronological order (oldest first)
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+
+	return msgs, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

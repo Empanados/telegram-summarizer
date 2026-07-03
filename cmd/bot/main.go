@@ -40,7 +40,7 @@ func main() {
 	}
 	defer col.Stop()
 
-	aiClient := ai.New(cfg.AnthropicAPIKey)
+	aiClient := ai.New(cfg.GeminiAPIKey)
 
 	b, err := bot.New(cfg.BotToken, db, col, aiClient)
 	if err != nil {

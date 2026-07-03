@@ -12,7 +12,7 @@ import (
 
 type Config struct {
 	BotToken              string
-	AnthropicAPIKey       string
+	GeminiAPIKey          string
 	TelegramAPIID         int
 	TelegramAPIHash       string
 	SessionPath           string
@@ -46,7 +46,7 @@ func Load() (*Config, error) {
 
 	return &Config{
 		BotToken:              os.Getenv("BOT_TOKEN"),
-		AnthropicAPIKey:       os.Getenv("ANTHROPIC_API_KEY"),
+		GeminiAPIKey:          os.Getenv("GEMINI_API_KEY"),
 		TelegramAPIID:         apiID,
 		TelegramAPIHash:       os.Getenv("TELEGRAM_API_HASH"),
 		SessionPath:           sessionName,
@@ -57,9 +57,9 @@ func Load() (*Config, error) {
 
 func (c *Config) Validate() error {
 	var missing []string
-	if c.BotToken == ""        { missing = append(missing, "BOT_TOKEN") }
-	if c.AnthropicAPIKey == "" { missing = append(missing, "ANTHROPIC_API_KEY") }
-	if c.TelegramAPIID == 0    { missing = append(missing, "TELEGRAM_API_ID") }
+	if c.BotToken == ""     { missing = append(missing, "BOT_TOKEN") }
+	if c.GeminiAPIKey == "" { missing = append(missing, "GEMINI_API_KEY") }
+	if c.TelegramAPIID == 0 { missing = append(missing, "TELEGRAM_API_ID") }
 	if c.TelegramAPIHash == "" { missing = append(missing, "TELEGRAM_API_HASH") }
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))

@@ -13,10 +13,7 @@ import (
 )
 
 const (
-	apiURL   = "https://api.anthropic.com/v1/messages"
-	apiVer   = "2023-06-01"
-	model    = "claude-sonnet-4-6"
-	maxChars = 400 // per message in context
+	maxChars = 600 // max chars per message in context
 )
 
 type Client struct {
@@ -31,29 +28,33 @@ func New(apiKey string) *Client {
 	}
 }
 
-// AnswerQuestion answers a user question based exclusively on the provided messages.
-func (c *Client) AnswerQuestion(ctx context.Context, question string, msgs []storage.Message, channels []string) (string, error) {
+// AnswerQuestion answers a user question based exclusively on the provided messages of the active channel.
+func (c *Client) AnswerQuestion(ctx context.Context, question string, msgs []storage.Message, channel string) (string, error) {
 	if len(msgs) == 0 {
-		return "В добавленных каналах не найдено сообщений. Попробуйте выполнить /sync.", nil
+		return "В канале не найдено сообщений. Пожалуйста, выполните /sync для загрузки истории.", nil
 	}
 
-	channelsStr := "@" + strings.Join(channels, ", @")
-	context_ := formatMessages(msgs, 50)
+	context_ := formatMessages(msgs)
 
-	prompt := fmt.Sprintf(`Ты помощник, который отвечает на вопросы строго на основе сообщений из Telegram-каналов пользователя. Не используй знания из других источников.
-
-Каналы пользователя: %s
-
-Сообщения из каналов:
-%s
-
-Вопрос: %s
+	prompt := fmt.Sprintf(`Ты — ассистент, который отвечает на вопросы пользователя, используя исключительно предоставленный лог сообщений из Telegram-канала.
+Твоя задача — строго следовать правилам ниже.
 
 Правила:
-- Отвечай только на основе приведённых сообщений.
-- Указывай источник (@channel) для каждого факта.
-- Если ответа нет в сообщениях — честно скажи об этом.
-- Отвечай на русском языке.`, channelsStr, context_, question)
+1. Отвечай на вопрос пользователя только на основе информации из приведённых сообщений канала.
+2. Не используй никаких внешних знаний, предположений или информации, которой нет в предоставленном логе.
+3. Если в сообщениях канала нет ответа на вопрос, ответь строго следующей фразой: "В истории этого канала нет информации по вашему вопросу."
+4. Отвечай на русском языке.
+
+Выбранный Telegram-канал: @%s
+
+Сообщения из канала (в хронологическом порядке):
+---
+%s
+---
+
+Вопрос пользователя: %s
+
+Твой ответ:`, channel, context_, question)
 
 	return c.call(ctx, prompt)
 }
@@ -64,12 +65,14 @@ func (c *Client) SummarizeChannel(ctx context.Context, username string, msgs []s
 		return fmt.Sprintf("В канале @%s нет сохранённых сообщений. Выполните /sync.", username), nil
 	}
 
-	context_ := formatMessages(msgs, 60)
+	context_ := formatMessages(msgs)
 
 	prompt := fmt.Sprintf(`Сделай структурированное резюме последних сообщений из Telegram-канала @%s.
 
 Сообщения:
+---
 %s
+---
 
 Требования:
 - Выдели 3–5 главных тем или событий.
@@ -80,81 +83,90 @@ func (c *Client) SummarizeChannel(ctx context.Context, username string, msgs []s
 	return c.call(ctx, prompt)
 }
 
-// ── internal ──────────────────────────────────────────────────────────────────
+// ── Gemini API Integration ──────────────────────────────────────────────────
 
-type apiRequest struct {
-	Model     string       `json:"model"`
-	MaxTokens int          `json:"max_tokens"`
-	Messages  []apiMessage `json:"messages"`
+type geminiRequest struct {
+	Contents []geminiContent `json:"contents"`
 }
 
-type apiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type geminiContent struct {
+	Parts []geminiPart `json:"parts"`
 }
 
-type apiResponse struct {
-	Content []struct {
-		Text string `json:"text"`
-	} `json:"content"`
+type geminiPart struct {
+	Text string `json:"text"`
+}
+
+type geminiResponse struct {
+	Candidates []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
 }
 
 func (c *Client) call(ctx context.Context, prompt string) (string, error) {
-	body, err := json.Marshal(apiRequest{
-		Model:     model,
-		MaxTokens: 1500,
-		Messages:  []apiMessage{{Role: "user", Content: prompt}},
-	})
+	reqBody := geminiRequest{
+		Contents: []geminiContent{
+			{
+				Parts: []geminiPart{
+					{Text: prompt},
+				},
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=%s", c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", apiVer)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("anthropic request: %w", err)
+		return "", fmt.Errorf("gemini request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var result apiResponse
+	var result geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return "", fmt.Errorf("decode gemini response: %w", err)
 	}
+
 	if resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("API error %d", resp.StatusCode)
+		msg := fmt.Sprintf("Gemini API error %d", resp.StatusCode)
 		if result.Error != nil {
 			msg += ": " + result.Error.Message
 		}
 		return "", fmt.Errorf(msg)
 	}
-	if len(result.Content) == 0 {
-		return "", fmt.Errorf("empty response from Claude")
+
+	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("empty response from Gemini")
 	}
-	return result.Content[0].Text, nil
+
+	return result.Candidates[0].Content.Parts[0].Text, nil
 }
 
-func formatMessages(msgs []storage.Message, limit int) string {
-	if len(msgs) > limit {
-		msgs = msgs[:limit]
-	}
+func formatMessages(msgs []storage.Message) string {
 	var sb strings.Builder
 	for _, m := range msgs {
-		date := m.Date.Format("2006-01-02")
+		date := m.Date.Format("2006-01-02 15:04:05")
 		text := strings.ReplaceAll(m.Text, "\n", " ")
 		if len(text) > maxChars {
 			text = text[:maxChars] + "…"
 		}
-		fmt.Fprintf(&sb, "[%s @%s] %s\n\n", date, m.Username, text)
+		fmt.Fprintf(&sb, "[%s] %s\n", date, text)
 	}
 	return sb.String()
 }

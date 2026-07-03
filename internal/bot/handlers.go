@@ -69,6 +69,10 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.cmdStart(msg)
 	case "add":
 		b.cmdAdd(ctx, msg)
+	case "select":
+		b.cmdSelect(msg)
+	case "active":
+		b.cmdActive(msg)
 	case "channels":
 		b.cmdChannels(msg)
 	case "remove":
@@ -81,16 +85,18 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 func (b *Bot) cmdStart(msg *tgbotapi.Message) {
-	b.send(msg.Chat.ID, `👋 *Привет\!* Я помогаю искать и суммаризировать информацию из Telegram\-каналов\.
+	b.send(msg.Chat.ID, `👋 *Привет\!* Я помогаю отвечать на вопросы по конкретным Telegram\-каналам с помощью Gemini\.
 
 📌 *Команды:*
-/add @channel — добавить канал
-/channels — список каналов
+/add @channel — добавить канал и сделать его активным
+/select @channel — сделать ранее добавленный канал активным
+/active — показать текущий активный канал
+/channels — список всех добавленных каналов
 /remove @channel — удалить канал
-/sync — загрузить новые сообщения
+/sync — обновить сообщения во всех каналах
 /summary @channel — краткое резюме канала
 
-💬 Просто напишите вопрос — отвечу на основе ваших каналов\.`)
+💬 После подключения и выбора канала, вы можете задать вопрос в свободной форме прямо в чате\. Я отвечу на него строго на основе сообщений этого канала\.`)
 }
 
 func (b *Bot) cmdAdd(ctx context.Context, msg *tgbotapi.Message) {
@@ -115,14 +121,15 @@ func (b *Bot) cmdAdd(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 	_ = b.db.UpdateChannelInfo(msg.Chat.ID, username, info.ID, info.Title)
+	_ = b.db.SetActiveChannel(msg.Chat.ID, username)
 
 	if added {
 		b.edit(msg.Chat.ID, wait, fmt.Sprintf(
-			"✅ Канал *%s* \\(`@%s`\\) добавлен\\!\n\nИспользуйте /sync для загрузки сообщений\\.",
+			"✅ Канал *%s* \\(`@%s`\\) добавлен и установлен как активный\\!\n\nИспользуйте /sync для загрузки сообщений\\.",
 			escMD(info.Title), escMD(username),
 		))
 	} else {
-		b.edit(msg.Chat.ID, wait, fmt.Sprintf("Канал `@%s` уже есть в вашем списке\\.", escMD(username)))
+		b.edit(msg.Chat.ID, wait, fmt.Sprintf("Канал `@%s` установлен как активный\\.", escMD(username)))
 	}
 }
 
@@ -133,6 +140,8 @@ func (b *Bot) cmdChannels(msg *tgbotapi.Message) {
 		return
 	}
 
+	active, _ := b.db.GetActiveChannel(msg.Chat.ID)
+
 	var sb strings.Builder
 	sb.WriteString("📋 *Ваши каналы:*\n\n")
 	for _, ch := range channels {
@@ -141,8 +150,12 @@ func (b *Bot) cmdChannels(msg *tgbotapi.Message) {
 			title = ch.Username
 		}
 		count, _ := b.db.MessageCount(ch.Username)
-		fmt.Fprintf(&sb, "• *%s* \\(`@%s`\\) — %d сообщений\n",
-			escMD(title), escMD(ch.Username), count)
+		marker := ""
+		if strings.ToLower(ch.Username) == strings.ToLower(active) {
+			marker = " ⭐ *[Активный]*"
+		}
+		fmt.Fprintf(&sb, "• *%s* \\(`@%s`\\)%s — %d сообщений\n",
+			escMD(title), escMD(ch.Username), marker, count)
 	}
 	b.sendMD(msg.Chat.ID, sb.String())
 }
@@ -159,7 +172,50 @@ func (b *Bot) cmdRemove(msg *tgbotapi.Message) {
 		b.sendMD(msg.Chat.ID, fmt.Sprintf("Канал `@%s` не найден в вашем списке\\.", escMD(username)))
 		return
 	}
+
+	active, _ := b.db.GetActiveChannel(msg.Chat.ID)
+	if strings.ToLower(username) == strings.ToLower(active) {
+		_ = b.db.ClearActiveChannel(msg.Chat.ID)
+	}
+
 	b.sendMD(msg.Chat.ID, fmt.Sprintf("✅ Канал `@%s` удалён\\.", escMD(username)))
+}
+
+func (b *Bot) cmdSelect(msg *tgbotapi.Message) {
+	arg := strings.TrimSpace(msg.CommandArguments())
+	if arg == "" {
+		b.send(msg.Chat.ID, "Укажите канал: /select @channelname")
+		return
+	}
+	username := norm(arg)
+
+	belongs, err := b.db.ChannelBelongsToUser(msg.Chat.ID, username)
+	if err != nil || !belongs {
+		b.sendMD(msg.Chat.ID, fmt.Sprintf("❌ Канал `@%s` не найден в вашем списке\\. Сначала добавьте его с помощью `/add @%s`\\.", escMD(username), escMD(username)))
+		return
+	}
+
+	err = b.db.SetActiveChannel(msg.Chat.ID, username)
+	if err != nil {
+		b.send(msg.Chat.ID, "❌ Ошибка при выборе активного канала.")
+		return
+	}
+
+	b.sendMD(msg.Chat.ID, fmt.Sprintf("⭐ Канал `@%s` теперь выбран как активный\\. Все вопросы в свободной форме будут задаваться по нему\\.", escMD(username)))
+}
+
+func (b *Bot) cmdActive(msg *tgbotapi.Message) {
+	active, err := b.db.GetActiveChannel(msg.Chat.ID)
+	if err != nil {
+		b.send(msg.Chat.ID, "❌ Ошибка базы данных.")
+		return
+	}
+	if active == "" {
+		b.send(msg.Chat.ID, "У вас нет активного канала. Выберите его с помощью команды /select @channel или добавьте новый через /add @channel.")
+		return
+	}
+
+	b.sendMD(msg.Chat.ID, fmt.Sprintf("⭐ Текущий активный канал: `@%s`\\. Все ваши вопросы будут анализировать историю этого канала\\.", escMD(active)))
 }
 
 func (b *Bot) cmdSync(ctx context.Context, msg *tgbotapi.Message) {
@@ -227,28 +283,28 @@ func (b *Bot) cmdSummary(ctx context.Context, msg *tgbotapi.Message) {
 // ── Free-text question ────────────────────────────────────────────────────────
 
 func (b *Bot) handleQuestion(ctx context.Context, msg *tgbotapi.Message) {
-	channels, _ := b.db.GetUserChannels(msg.Chat.ID)
-	if len(channels) == 0 {
-		b.send(msg.Chat.ID, "Добавьте каналы через /add @channel, затем синхронизируйте /sync")
+	active, err := b.db.GetActiveChannel(msg.Chat.ID)
+	if err != nil {
+		b.send(msg.Chat.ID, "❌ Ошибка базы данных.")
+		return
+	}
+	if active == "" {
+		b.send(msg.Chat.ID, "Пожалуйста, сначала выберите активный канал с помощью `/select @channel` или добавьте его через `/add @channel`.")
 		return
 	}
 
-	wait := b.sendMD(msg.Chat.ID, "🔍 Ищу в ваших каналах…")
+	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("🔍 Анализирую сообщения канала @%s…", active))
 
-	usernames := make([]string, len(channels))
-	for i, ch := range channels {
-		usernames[i] = ch.Username
-	}
-
-	msgs, err := b.db.SearchMessages(usernames, msg.Text, 50)
+	// Get recent 300 messages to feed into Gemini context
+	msgs, err := b.db.GetRecentMessages(active, 300)
 	if err != nil {
-		b.edit(msg.Chat.ID, wait, "❌ Ошибка при поиске\\.")
+		b.edit(msg.Chat.ID, wait, "❌ Ошибка при чтении сообщений из базы данных\\.")
 		return
 	}
 
-	answer, err := b.ai.AnswerQuestion(ctx, msg.Text, msgs, usernames)
+	answer, err := b.ai.AnswerQuestion(ctx, msg.Text, msgs, active)
 	if err != nil {
-		b.edit(msg.Chat.ID, wait, fmt.Sprintf("❌ Ошибка Claude API: %s", escMD(err.Error())))
+		b.edit(msg.Chat.ID, wait, fmt.Sprintf("❌ Ошибка Gemini API: %s", escMD(err.Error())))
 		return
 	}
 
