@@ -110,6 +110,33 @@ type geminiResponse struct {
 	} `json:"error,omitempty"`
 }
 
+type geminiEmbedRequest struct {
+	Content              geminiContent `json:"content"`
+	OutputDimensionality int           `json:"output_dimensionality,omitempty"`
+}
+
+type geminiBatchRequest struct {
+	Model                string        `json:"model"`
+	Content              geminiContent `json:"content"`
+	OutputDimensionality int           `json:"output_dimensionality,omitempty"`
+}
+
+type geminiBatchEmbedRequest struct {
+	Requests []geminiBatchRequest `json:"requests"`
+}
+
+type geminiEmbedResponse struct {
+	Embedding struct {
+		Values []float32 `json:"values"`
+	} `json:"embedding"`
+}
+
+type geminiBatchEmbedResponse struct {
+	Embeddings []struct {
+		Values []float32 `json:"values"`
+	} `json:"embeddings"`
+}
+
 func (c *Client) call(ctx context.Context, prompt string) (string, error) {
 	reqBody := geminiRequest{
 		Contents: []geminiContent{
@@ -169,4 +196,96 @@ func formatMessages(msgs []storage.Message) string {
 		fmt.Fprintf(&sb, "[%s] %s\n", date, text)
 	}
 	return sb.String()
+}
+
+func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	reqBody := geminiEmbedRequest{
+		Content: geminiContent{
+			Parts: []geminiPart{
+				{Text: text},
+			},
+		},
+		OutputDimensionality: 768,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=%s", c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gemini request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gemini embed status %d", resp.StatusCode)
+	}
+
+	var result geminiEmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	return result.Embedding.Values, nil
+}
+
+func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	reqs := make([]geminiBatchRequest, len(texts))
+	for i, txt := range texts {
+		reqs[i] = geminiBatchRequest{
+			Model: "models/gemini-embedding-2",
+			Content: geminiContent{
+				Parts: []geminiPart{
+					{Text: txt},
+				},
+			},
+			OutputDimensionality: 768,
+		}
+	}
+
+	reqBody := geminiBatchEmbedRequest{Requests: reqs}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents?key=%s", c.apiKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("gemini request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("gemini batch embed status %d", resp.StatusCode)
+	}
+
+	var result geminiBatchEmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	vals := make([][]float32, len(result.Embeddings))
+	for i, emb := range result.Embeddings {
+		vals[i] = emb.Values
+	}
+	return vals, nil
 }

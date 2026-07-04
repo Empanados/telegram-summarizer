@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -238,6 +241,11 @@ func (b *Bot) cmdSync(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	// Generate embeddings for new messages
+	for username := range results {
+		_ = b.syncEmbeddings(ctx, username)
+	}
+
 	var sb strings.Builder
 	sb.WriteString("✅ *Синхронизация завершена:*\n\n")
 	for username, count := range results {
@@ -300,11 +308,68 @@ func (b *Bot) handleQuestion(ctx context.Context, msg *tgbotapi.Message) {
 
 	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("🔍 Анализирую сообщения канала @%s…", escMD(active)))
 
-	// Get recent 300 messages to feed into Gemini context
-	msgs, err := b.db.GetRecentMessages(active, 300)
+	// Sync any missing embeddings for the active channel first
+	_ = b.syncEmbeddings(ctx, active)
+
+	// Fetch query vector
+	queryVec, err := b.ai.EmbedText(ctx, msg.Text)
 	if err != nil {
-		b.edit(msg.Chat.ID, wait, "❌ Ошибка при чтении сообщений из базы данных\\.")
+		b.edit(msg.Chat.ID, wait, fmt.Sprintf("❌ Ошибка при подготовке вопроса (API эмбеддингов): %v", escMD(err.Error())))
 		return
+	}
+
+	// Fetch all message embeddings for active channel
+	embs, err := b.db.GetMessageEmbeddings(active)
+	if err != nil {
+		b.edit(msg.Chat.ID, wait, "❌ Ошибка при чтении эмбеддингов из базы данных\\.")
+		return
+	}
+
+	var msgs []storage.Message
+	if len(embs) == 0 {
+		// Fallback to recent messages if no embeddings exist
+		msgs, err = b.db.GetRecentMessages(active, 300)
+		if err != nil {
+			b.edit(msg.Chat.ID, wait, "❌ Ошибка при чтении сообщений из базы данных\\.")
+			return
+		}
+	} else {
+		// Rank by similarity
+		type score struct {
+			messageID  int
+			similarity float32
+		}
+		var scores []score
+		for id, vec := range embs {
+			sim := cosineSimilarity(queryVec, vec)
+			scores = append(scores, score{messageID: id, similarity: sim})
+		}
+
+		sort.Slice(scores, func(i, j int) bool {
+			return scores[i].similarity > scores[j].similarity
+		})
+
+		// Select top 40 messages
+		limit := 40
+		if len(scores) < limit {
+			limit = len(scores)
+		}
+		topIDs := make([]int, limit)
+		for i := 0; i < limit; i++ {
+			topIDs[i] = scores[i].messageID
+		}
+
+		// Retrieve message content
+		msgs, err = b.db.GetMessagesByIDs(active, topIDs)
+		if err != nil {
+			b.edit(msg.Chat.ID, wait, "❌ Ошибка при получении сообщений по ID\\.")
+			return
+		}
+
+		// Reverse to chronological order (oldest first)
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
 	}
 
 	answer, err := b.ai.AnswerQuestion(ctx, msg.Text, msgs, active)
@@ -314,6 +379,66 @@ func (b *Bot) handleQuestion(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	b.edit(msg.Chat.ID, wait, escMD(answer))
+}
+
+func (b *Bot) syncEmbeddings(ctx context.Context, username string) error {
+	log.Printf("[Bot] Syncing embeddings for @%s...", username)
+	for {
+		// Fetch messages that lack embeddings
+		msgs, err := b.db.GetMessagesWithoutEmbeddings(username, 50)
+		if err != nil {
+			return fmt.Errorf("get messages without embeddings: %w", err)
+		}
+		if len(msgs) == 0 {
+			break
+		}
+
+		// Extract texts for embedding
+		texts := make([]string, len(msgs))
+		ids := make([]int, len(msgs))
+		for i, m := range msgs {
+			texts[i] = m.Text
+			ids[i] = m.MessageID
+		}
+
+		// Call Gemini embedding API
+		embs, err := b.ai.EmbedTexts(ctx, texts)
+		if err != nil {
+			log.Printf("[Bot] Failed to generate embeddings for batch: %v", err)
+			return err
+		}
+
+		// Save embeddings to DB
+		err = b.db.SaveEmbeddings(username, ids, embs)
+		if err != nil {
+			return fmt.Errorf("save embeddings: %w", err)
+		}
+		log.Printf("[Bot] Generated and saved %d embeddings for @%s", len(msgs), username)
+
+		// Brief sleep to avoid spamming the API too quickly
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return nil
+}
+
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dotProduct, normA, normB float32
+	for i := 0; i < len(a); i++ {
+		dotProduct += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dotProduct / float32(math.Sqrt(float64(normA)*float64(normB)))
 }
 
 // ── Telegram helpers ──────────────────────────────────────────────────────────

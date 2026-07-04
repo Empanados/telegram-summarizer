@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,6 +67,12 @@ func (d *DB) migrate() error {
 		CREATE TABLE IF NOT EXISTS active_channel (
 			user_id    INTEGER PRIMARY KEY,
 			username   TEXT    NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS message_embeddings (
+			username   TEXT    NOT NULL,
+			message_id INTEGER NOT NULL,
+			embedding  BLOB    NOT NULL,
+			PRIMARY KEY (username, message_id)
 		);
 		CREATE INDEX IF NOT EXISTS idx_msg_username ON messages(username);
 		CREATE INDEX IF NOT EXISTS idx_msg_date     ON messages(date DESC);
@@ -345,4 +353,132 @@ func hasAny(text string, words []string) bool {
 		}
 	}
 	return false
+}
+
+func (d *DB) SaveEmbeddings(username string, messageIDs []int, embeddings [][]float32) error {
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO message_embeddings (username, message_id, embedding) VALUES (?, ?, ?)`,
+	)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+
+	for i, id := range messageIDs {
+		embBytes := float32ToBytes(embeddings[i])
+		_, err = stmt.Exec(norm(username), id, embBytes)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) GetMessagesWithoutEmbeddings(username string, limit int) ([]Message, error) {
+	rows, err := d.db.Query(
+		`SELECT m.username, m.message_id, m.date, m.text
+		 FROM messages m
+		 LEFT JOIN message_embeddings e ON m.username = e.username AND m.message_id = e.message_id
+		 WHERE m.username = ? AND m.text != '' AND e.message_id IS NULL
+		 ORDER BY m.date DESC LIMIT ?`,
+		norm(username), limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var m Message
+		var dateStr string
+		if err := rows.Scan(&m.Username, &m.MessageID, &dateStr, &m.Text); err != nil {
+			return nil, err
+		}
+		m.Date, _ = time.Parse(time.RFC3339, dateStr)
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+func (d *DB) GetMessageEmbeddings(username string) (map[int][]float32, error) {
+	rows, err := d.db.Query(
+		`SELECT message_id, embedding FROM message_embeddings WHERE username = ?`,
+		norm(username),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	embs := make(map[int][]float32)
+	for rows.Next() {
+		var id int
+		var b []byte
+		if err := rows.Scan(&id, &b); err != nil {
+			return nil, err
+		}
+		embs[id] = bytesToFloat32(b)
+	}
+	return embs, rows.Err()
+}
+
+func (d *DB) GetMessagesByIDs(username string, ids []int) ([]Message, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]any, len(ids)+1)
+	args[0] = norm(username)
+	for i, id := range ids {
+		args[i+1] = id
+	}
+
+	rows, err := d.db.Query(
+		fmt.Sprintf(`SELECT username, message_id, date, text
+		             FROM messages
+		             WHERE username = ? AND message_id IN (%s)
+		             ORDER BY date DESC`, placeholders),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []Message
+	for rows.Next() {
+		var m Message
+		var dateStr string
+		if err := rows.Scan(&m.Username, &m.MessageID, &dateStr, &m.Text); err != nil {
+			return nil, err
+		}
+		m.Date, _ = time.Parse(time.RFC3339, dateStr)
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+func float32ToBytes(vec []float32) []byte {
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.LittleEndian, vec)
+	return buf.Bytes()
+}
+
+func bytesToFloat32(b []byte) []float32 {
+	buf := bytes.NewReader(b)
+	vec := make([]float32, len(b)/4)
+	_ = binary.Read(buf, binary.LittleEndian, &vec)
+	return vec
 }
