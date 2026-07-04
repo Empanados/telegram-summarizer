@@ -153,36 +153,53 @@ func (c *Client) call(ctx context.Context, prompt string) (string, error) {
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=%s", c.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("gemini request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result geminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode gemini response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		msg := fmt.Sprintf("Gemini API error %d", resp.StatusCode)
-		if result.Error != nil {
-			msg += ": " + result.Error.Message
+	backoff := 1 * time.Second
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return "", err
 		}
-		return "", fmt.Errorf(msg)
-	}
+		req.Header.Set("Content-Type", "application/json")
 
-	if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("empty response from Gemini")
-	}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("gemini request: %w", err)
+		}
 
-	return result.Candidates[0].Content.Parts[0].Text, nil
+		if resp.StatusCode == http.StatusTooManyRequests { // 429
+			resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+				continue
+			}
+		}
+
+		var result geminiResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("decode gemini response: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			msg := fmt.Sprintf("Gemini API error %d", resp.StatusCode)
+			if result.Error != nil {
+				msg += ": " + result.Error.Message
+			}
+			return "", fmt.Errorf(msg)
+		}
+
+		if len(result.Candidates) == 0 || len(result.Candidates[0].Content.Parts) == 0 {
+			return "", fmt.Errorf("empty response from Gemini")
+		}
+
+		return result.Candidates[0].Content.Parts[0].Text, nil
+	}
+	return "", fmt.Errorf("gemini rate limited after 5 attempts")
 }
 
 func formatMessages(msgs []storage.Message) string {
@@ -213,28 +230,46 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent?key=%s", c.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gemini request: %w", err)
-	}
-	defer resp.Body.Close()
+	backoff := 1 * time.Second
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gemini embed status %d", resp.StatusCode)
-	}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("gemini request: %w", err)
+		}
 
-	var result geminiEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
+		if resp.StatusCode == http.StatusTooManyRequests { // 429
+			resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+				continue
+			}
+		}
 
-	return result.Embedding.Values, nil
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("gemini embed status %d", resp.StatusCode)
+		}
+
+		var result geminiEmbedResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decode response: %w", err)
+		}
+
+		return result.Embedding.Values, nil
+	}
+	return nil, fmt.Errorf("gemini embed rate limited after 5 attempts")
 }
 
 func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
@@ -262,30 +297,48 @@ func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, e
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents?key=%s", c.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("gemini request: %w", err)
-	}
-	defer resp.Body.Close()
+	backoff := 1 * time.Second
+	for attempt := 0; attempt < 5; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("gemini batch embed status %d", resp.StatusCode)
-	}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("gemini request: %w", err)
+		}
 
-	var result geminiBatchEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
+		if resp.StatusCode == http.StatusTooManyRequests { // 429
+			resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+				continue
+			}
+		}
 
-	vals := make([][]float32, len(result.Embeddings))
-	for i, emb := range result.Embeddings {
-		vals[i] = emb.Values
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("gemini batch embed status %d", resp.StatusCode)
+		}
+
+		var result geminiBatchEmbedResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decode response: %w", err)
+		}
+
+		vals := make([][]float32, len(result.Embeddings))
+		for i, emb := range result.Embeddings {
+			vals[i] = emb.Values
+		}
+		return vals, nil
 	}
-	return vals, nil
+	return nil, fmt.Errorf("gemini batch embed rate limited after 5 attempts")
 }

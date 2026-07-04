@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"math"
 	"sort"
@@ -229,15 +230,15 @@ func (b *Bot) cmdActive(msg *tgbotapi.Message) {
 func (b *Bot) cmdSync(ctx context.Context, msg *tgbotapi.Message) {
 	channels, _ := b.db.GetUserChannels(msg.Chat.ID)
 	if len(channels) == 0 {
-		b.send(msg.Chat.ID, "Нет каналов для синхронизации\\. Добавьте их через /add")
+		b.send(msg.Chat.ID, "Нет каналов для синхронизации. Добавьте их через /add")
 		return
 	}
 
-	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("⏳ Синхронизирую %d канал\\(ов\\)…", len(channels)))
+	wait := b.sendHTML(msg.Chat.ID, fmt.Sprintf("⏳ Синхронизирую %d канал(ов)…", len(channels)))
 
 	results, err := b.collector.CollectForUser(ctx, msg.Chat.ID)
 	if err != nil {
-		b.edit(msg.Chat.ID, wait, "❌ Ошибка при синхронизации\\.")
+		b.editHTML(msg.Chat.ID, wait, "❌ Ошибка при синхронизации.")
 		return
 	}
 
@@ -247,12 +248,12 @@ func (b *Bot) cmdSync(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("✅ *Синхронизация завершена:*\n\n")
+	sb.WriteString("✅ <b>Синхронизация завершена:</b>\n\n")
 	for username, count := range results {
 		total, _ := b.db.MessageCount(username)
-		fmt.Fprintf(&sb, "• `@%s`: \\+%d новых \\(всего %d\\)\n", escMD(username), count, total)
+		fmt.Fprintf(&sb, "• <code>@%s</code>: +%d новых (всего %d)\n", html.EscapeString(username), count, total)
 	}
-	b.edit(msg.Chat.ID, wait, sb.String())
+	b.editHTML(msg.Chat.ID, wait, sb.String())
 }
 
 func (b *Bot) cmdSummary(ctx context.Context, msg *tgbotapi.Message) {
@@ -452,6 +453,16 @@ func (b *Bot) send(chatID int64, text string) int {
 	return sent.MessageID
 }
 
+func (b *Bot) sendHTML(chatID int64, text string) int {
+	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = tgbotapi.ModeHTML
+	sent, err := b.api.Send(m)
+	if err != nil {
+		log.Printf("[Bot] Error sending HTML message: %v", err)
+	}
+	return sent.MessageID
+}
+
 func (b *Bot) sendMD(chatID int64, text string) int {
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = tgbotapi.ModeMarkdownV2
@@ -460,6 +471,15 @@ func (b *Bot) sendMD(chatID int64, text string) int {
 		log.Printf("[Bot] Error sending MD message: %v", err)
 	}
 	return sent.MessageID
+}
+
+func (b *Bot) editHTML(chatID int64, msgID int, text string) {
+	e := tgbotapi.NewEditMessageText(chatID, msgID, text)
+	e.ParseMode = tgbotapi.ModeHTML
+	_, err := b.api.Send(e)
+	if err != nil {
+		log.Printf("[Bot] Error editing HTML message %d: %v", msgID, err)
+	}
 }
 
 func (b *Bot) edit(chatID int64, msgID int, text string) {
