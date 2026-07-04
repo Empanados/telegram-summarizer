@@ -54,6 +54,11 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, msg *tgbotapi.Message) {
+	username := msg.From.UserName
+	if username == "" {
+		username = msg.From.FirstName
+	}
+	log.Printf("[Bot] Incoming message from @%s: %q", username, msg.Text)
 	if msg.IsCommand() {
 		b.handleCommand(ctx, msg)
 	} else {
@@ -107,7 +112,7 @@ func (b *Bot) cmdAdd(ctx context.Context, msg *tgbotapi.Message) {
 	}
 	username := norm(arg)
 
-	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("Проверяю канал @%s…", username))
+	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("Проверяю канал @%s…", escMD(username)))
 
 	info, err := b.collector.ResolveChannel(ctx, username)
 	if err != nil {
@@ -293,7 +298,7 @@ func (b *Bot) handleQuestion(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("🔍 Анализирую сообщения канала @%s…", active))
+	wait := b.sendMD(msg.Chat.ID, fmt.Sprintf("🔍 Анализирую сообщения канала @%s…", escMD(active)))
 
 	// Get recent 300 messages to feed into Gemini context
 	msgs, err := b.db.GetRecentMessages(active, 300)
@@ -315,21 +320,30 @@ func (b *Bot) handleQuestion(ctx context.Context, msg *tgbotapi.Message) {
 
 func (b *Bot) send(chatID int64, text string) int {
 	m := tgbotapi.NewMessage(chatID, text)
-	sent, _ := b.api.Send(m)
+	sent, err := b.api.Send(m)
+	if err != nil {
+		log.Printf("[Bot] Error sending message: %v", err)
+	}
 	return sent.MessageID
 }
 
 func (b *Bot) sendMD(chatID int64, text string) int {
 	m := tgbotapi.NewMessage(chatID, text)
 	m.ParseMode = tgbotapi.ModeMarkdownV2
-	sent, _ := b.api.Send(m)
+	sent, err := b.api.Send(m)
+	if err != nil {
+		log.Printf("[Bot] Error sending MD message: %v", err)
+	}
 	return sent.MessageID
 }
 
 func (b *Bot) edit(chatID int64, msgID int, text string) {
 	e := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	e.ParseMode = tgbotapi.ModeMarkdownV2
-	_, _ = b.api.Send(e)
+	_, err := b.api.Send(e)
+	if err != nil {
+		log.Printf("[Bot] Error editing message %d: %v", msgID, err)
+	}
 }
 
 // escMD escapes special characters for Telegram MarkdownV2.
